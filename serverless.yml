@@ -24,6 +24,7 @@ provider:
     REGION: us-west-1
     TABLE_NAME: ${self:service}-db-${opt:stage, self:provider.stage}
     SLACK_ACCESS_TOKEN: ${ssm:/us/kanome/slack/slash-command-token~true}
+    SLACK_VERIFICATION_TOKEN: ${ssm:/us/kanome/slack/slash-command-verification-token~true}
 
 plugins:
   - serverless-prune-plugin
@@ -44,13 +45,6 @@ package:
     - ./bin/**
 
 functions:
-  KanowinsHelp:
-    handler: bin/KanowinsHelp
-    events:
-      - http:
-          path: / 
-          method: post
-          cors: true
   KanowinsCommand:
     handler: bin/KanowinsCommand
     events:

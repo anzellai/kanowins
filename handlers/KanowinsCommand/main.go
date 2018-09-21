@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -87,6 +88,17 @@ func Handler(ctx context.Context, r ProxyRequest) (Response, error) {
 		ResponseURL: query["response_url"][0],
 	}
 	log.Printf("%s.Handler - invoke: %+v, for: %s, trigger_id: %s", handler, request, request.Text, request.TriggerID)
+	if request.Token != os.Getenv("SLACK_VERIFICATION_TOKEN") {
+		err = errors.New("invalid verification token")
+		return Response{
+			StatusCode:      400,
+			IsBase64Encoded: false,
+			Body:            fmt.Sprintf("%s submitting - error: %v", handler, err),
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+			},
+		}, err
+	}
 	payload, err := json.Marshal(Payload{
 		TriggerID: request.TriggerID,
 		Dialog: Dialog{
