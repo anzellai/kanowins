@@ -10,9 +10,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 )
 
 const (
@@ -67,6 +73,47 @@ type Element struct {
 	Optional bool   `json:"optional"`
 }
 
+// Win is the WIN struct type ...
+type Win struct {
+	UserID      string    `json:"user_id"`
+	UserName    string    `json:"user_name"`
+	Who         string    `json:"who"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	TTL         int64     `json:"ttl"`
+}
+
+// GetDB return DDB handle
+func GetDB() (srv *dynamodb.DynamoDB, err error) {
+	region := os.Getenv("REGION")
+	sess, err := session.NewSession(&aws.Config{Region: aws.String(region)})
+	if err != nil {
+		return
+	}
+	srv = dynamodb.New(sess)
+	return
+}
+
+// GetWins returns latest weekly WINS
+func GetWins() ([]Win, error) {
+	wins := []Win{}
+	srv, err := GetDB()
+	if err != nil {
+		return wins, err
+	}
+	params := &dynamodb.ScanInput{
+		TableName: aws.String(os.Getenv("TABLE_NAME")),
+	}
+	result, err := srv.Scan(params)
+	if err != nil {
+		return wins, err
+	}
+	err = dynamodbattribute.UnmarshalListOfMaps(result.Items, &wins)
+	return wins, err
+}
+
 // Handler is our lambda handler invoked by the `lambda.Start` function call
 func Handler(ctx context.Context, r ProxyRequest) (Response, error) {
 	log.Printf("%s.Handler - invoke: %+v", handler, r)
@@ -99,6 +146,21 @@ func Handler(ctx context.Context, r ProxyRequest) (Response, error) {
 			},
 		}, err
 	}
+	if strings.ToLower(request.Text) == "summary" {
+		wins, err := getSummary(request)
+		log.Printf("%s.Handler - getSummary: %+v, error: %+v", handler, wins, err)
+		if err != nil {
+			return Response{
+				StatusCode:      400,
+				IsBase64Encoded: false,
+				Body:            fmt.Sprintf("%s summary - error: %v", handler, err),
+				Headers: map[string]string{
+					"Content-Type": "application/json",
+				},
+			}, err
+		}
+	}
+
 	payload, err := json.Marshal(Payload{
 		TriggerID: request.TriggerID,
 		Dialog: Dialog{
@@ -159,13 +221,69 @@ func Handler(ctx context.Context, r ProxyRequest) (Response, error) {
 	resp := Response{
 		StatusCode:      200,
 		IsBase64Encoded: false,
-		Body:            fmt.Sprintf("%s submitting - error: %v", handler, err),
+		Body:            "",
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
 	}
 
 	return resp, nil
+}
+
+// WinSummary struct ...
+type WinSummary struct {
+	Who         string `json:"who"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func getSummary(request Request) (wins []Win, err error) {
+	// return a summary of collected WINS
+	wins, err = GetWins()
+	if err != nil {
+		return
+	}
+	winsSummary := []WinSummary{}
+	for _, win := range wins {
+		if time.Now().Sub(win.CreatedAt).Hours() > float64(12.0) {
+			winsSummary = append(winsSummary, WinSummary{
+				Who:         win.Who,
+				Title:       win.Title,
+				Description: win.Description,
+				CreatedAt:   win.CreatedAt.Format(time.RFC3339)[:19],
+			})
+		}
+	}
+	winsText, _ := json.MarshalIndent(winsSummary, "", "  ")
+	summaryText := []string{
+		"=============================",
+		" Summary for last 7 days (TTL)",
+		fmt.Sprintf(" WINS count: %d", len(winsSummary)),
+		"=============================",
+		"",
+		string(winsText),
+	}
+
+	summary, _ := json.Marshal(map[string]interface{}{
+		"text": strings.Join(summaryText, "\n"),
+	})
+	req, err := http.NewRequest("POST", request.ResponseURL, bytes.NewBuffer(summary))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("SLACK_ACCESS_TOKEN"))
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	var respBody map[string]interface{}
+	err = json.NewDecoder(resp.Body).Decode(&respBody)
+	log.Printf("%s.Handler - error receiving dialog response Body: %v", handler, respBody)
+	defer resp.Body.Close()
+	return
 }
 
 func main() {
